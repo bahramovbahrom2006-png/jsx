@@ -1,0 +1,189 @@
+// frontend/App.js (Expo)
+// Установи зависимости: expo init -> npm install axios @react-navigation/native @react-navigation/stack expo-secure-store react-native-gesture-handler react-native-safe-area-context
+// + для mnemonics: npm install bip39 react-native-get-random-values crypto-js
+// В RN для bip39 могут потребоваться доп. полифилы (см. README в проекте).
+import React, {useState, useEffect} from 'react';
+import { View, Text, TextInput, Button, Alert, ScrollView } from 'react-native';
+import axios from 'axios';
+import * as SecureStore from 'expo-secure-store';
+import 'react-native-get-random-values';
+import bip39 from 'bip39';
+import CryptoJS from 'crypto-js';
+import * as LocalAuthentication from 'expo-local-authentication';
+
+const API = 'http://10.0.2.2:3000'; // если используешь Android emulator; или http://localhost:3000 для web/pc
+
+export default function App(){
+  const [step, setStep] = useState('login'); // 'register','verify','seed','profile','home'
+  const [email, setEmail] = useState('');
+  const [code6, setCode6] = useState('');
+  const [pin4, setPin4] = useState('');
+  const [passphrase, setPassphrase] = useState(''); // user-chosen strong code (две проверки в UI)
+  const [passphraseConfirm, setPassphraseConfirm] = useState('');
+  const [mnemonic, setMnemonic] = useState(null);
+  const [token, setToken] = useState(null);
+  const [name, setName] = useState('');
+  const [dob, setDob] = useState('');
+  const [isFaceEnrolled, setIsFaceEnrolled] = useState(false);
+
+  // --- Registration step 1: request registration (send verification code to email)
+  const startRegister = async () => {
+    if(!email || !passphrase || passphrase !== passphraseConfirm || passphrase.length < 8){
+      Alert.alert('Ошибка', 'Проверь email и код (код 8+ символов и подтверждение).');
+      return;
+    }
+    try{
+      const res = await axios.post(`${API}/auth/register-request`, { email });
+      if(res.data.ok){
+        setStep('verify');
+        Alert.alert('Код отправлен', 'Проверь почту и введи 6-значный код.');
+      } else Alert.alert('Ошибка', res.data.error || 'Не удалось отправить код.');
+    }catch(e){
+      Alert.alert('Ошибка сети', e.message);
+    }
+  };
+
+  // --- Verify email code -> then generate mnemonic locally and show to user
+  const verifyAndCreateSeed = async () => {
+    try{
+      const res = await axios.post(`${API}/auth/verify-code`, { email, code: code6 });
+      if(!res.data.ok) return Alert.alert('Ошибка', res.data.error || 'Не верифицировано');
+
+      // Create mnemonic locally (client-side) — cold wallet: nobody except user sees seed
+      const mnemonic = bip39.generateMnemonic(128); // 12 words
+      setMnemonic(mnemonic);
+
+      // Encrypt mnemonic with passphrase and store in SecureStore
+      const ciphertext = CryptoJS.AES.encrypt(mnemonic, passphrase).toString();
+      await SecureStore.setItemAsync(`mnemonic:${email}`, ciphertext);
+      // Also store email as logged-in token locally for demo (in prod use JWT)
+      await SecureStore.setItemAsync('auth_email', email);
+      setStep('seed');
+    }catch(e){
+      Alert.alert('Ошибка', e.message);
+    }
+  };
+
+  // Confirm user wrote down the words
+  const confirmSeedSaved = async () => {
+    // Ask user to type some words to confirm (simple)
+    Alert.alert('Подтверждено', 'Заполни профиль');
+    setStep('profile');
+  };
+
+  const saveProfile = async () => {
+    if(!name || !dob) return Alert.alert('Ошибка', 'Заполни имя и дату рождения');
+    // Check 18+
+    // send profile to backend
+    try{
+      const res = await axios.post(`${API}/auth/complete-profile`, { email, name, dob });
+      if(res.data.ok){
+        setStep('home');
+      }
+    }catch(e){
+      Alert.alert('Ошибка сети', e.message);
+    }
+  };
+
+  const enrollFace = async () => {
+    const available = await LocalAuthentication.hasHardwareAsync();
+    if(!available) return Alert.alert('Нет биометрии', 'Твое устройство не поддерживает face/touch.');
+    const auth = await LocalAuthentication.authenticateAsync({ promptMessage: 'Зарегистрируй лицо' });
+    if(auth.success){
+      // Here ideally we'd capture a face template and store it encrypted
+      setIsFaceEnrolled(true);
+      Alert.alert('Готово', 'Лицо зарегистрировано (локально).');
+    }
+  };
+
+  // --- Simple UI flows:
+  if(step === 'login'){
+    return (
+      <ScrollView style={{padding:20}}>
+        <Text style={{fontSize:22,fontWeight:'700'}}>B-TraderAI — Вход / Регистрация</Text>
+        <Text>Email (Gmail)</Text>
+        <TextInput value={email} onChangeText={setEmail} placeholder="you@gmail.com" style={{borderWidth:1,padding:8,marginVertical:8}}/>
+        <Text>Придумай сложный код (пароль) — 2 раза</Text>
+        <TextInput value={passphrase} onChangeText={setPassphrase} secureTextEntry style={{borderWidth:1,padding:8,marginVertical:8}}/>
+        <TextInput value={passphraseConfirm} onChangeText={setPassphraseConfirm} secureTextEntry style={{borderWidth:1,padding:8,marginBottom:12}}/>
+        <Button title="Зарегистрироваться — выслать код на email" onPress={startRegister}/>
+        <View style={{height:12}}/>
+        <Button title="У меня уже есть аккаунт (вход по email и паролю)" onPress={()=>setStep('loginExisting')}/>
+      </ScrollView>
+    );
+  }
+
+  if(step === 'verify'){
+    return (
+      <View style={{padding:20}}>
+        <Text>Введи 6-значный код из почты</Text>
+        <TextInput value={code6} onChangeText={setCode6} placeholder="123456" keyboardType="numeric" style={{borderWidth:1,padding:8,marginVertical:8}}/>
+        <Button title="Подтвердить и сгенерировать 12 слов" onPress={verifyAndCreateSeed}/>
+      </View>
+    );
+  }
+
+  if(step === 'seed'){
+    return (
+      <ScrollView style={{padding:20}}>
+        <Text style={{fontWeight:'700'}}>Это твои 12 слов — запиши их в тетрадь или в надежное место. Никто не сможет восстановить аккаунт без них.</Text>
+        <View style={{marginTop:12, padding:12, borderWidth:1}}>
+          <Text selectable>{mnemonic}</Text>
+        </View>
+        <View style={{height:12}}/>
+        <Button title="Я записал(а). Подтвердить" onPress={confirmSeedSaved}/>
+      </ScrollView>
+    );
+  }
+
+  if(step === 'profile'){
+    return (
+      <View style={{padding:20}}>
+        <Text>Имя Фамилия Отчество</Text>
+        <TextInput value={name} onChangeText={setName} style={{borderWidth:1,padding:8,marginVertical:8}}/>
+        <Text>Дата рождения (YYYY-MM-DD)</Text>
+        <TextInput value={dob} onChangeText={setDob} style={{borderWidth:1,padding:8,marginVertical:8}}/>
+        <Button title="Сохранить профиль" onPress={saveProfile}/>
+      </View>
+    );
+  }
+
+  if(step === 'home'){
+    return (
+      <ScrollView style={{padding:20}}>
+        <Text style={{fontSize:20,fontWeight:'700'}}>Добро пожаловать в B-TraderAI</Text>
+        <View style={{height:12}}/>
+        <Button title={isFaceEnrolled ? "Лицо зарегистрировано" : "Зарегистрировать лицо (рекомендуется)"} onPress={enrollFace}/>
+        <View style={{height:12}}/>
+        <Button title="Перейти в Бот (подписки / запустить)" onPress={() => Alert.alert('Перейти','Открой раздел Бот (в мобильном приложении)')}/>
+        <View style={{height:12}}/>
+        <Button title="Холодный кошелёк — открыть (PIN + Face)" onPress={async ()=>{
+          // require PIN and face (demo)
+          const pin = prompt('Введите 4-значный PIN для открытия кошелька (демо)') // prompt exists in webonly; in RN you'll use input
+          Alert.alert('Демо', 'Открытие холодного кошелька — demo flow');
+        }}/>
+      </ScrollView>
+    );
+  }
+
+  if(step === 'loginExisting'){
+    return (
+      <View style={{padding:20}}>
+        <Text>Вход в существующий аккаунт (email + код)</Text>
+        <TextInput value={email} onChangeText={setEmail} placeholder="you@gmail.com" style={{borderWidth:1,padding:8,marginVertical:8}}/>
+        <TextInput value={passphrase} onChangeText={setPassphrase} secureTextEntry placeholder="Пароль" style={{borderWidth:1,padding:8,marginBottom:12}}/>
+        <Button title="Войти" onPress={async ()=>{
+          try{
+            const res = await axios.post(`${API}/auth/login`, { email, password: passphrase });
+            if(res.data.ok){
+              setToken(res.data.token);
+              setStep('home');
+            } else Alert.alert('Ошибка', res.data.error || 'Не удалось войти');
+          }catch(e){ Alert.alert('Ошибка сети', e.message) }
+        }}/>
+      </View>
+    );
+  }
+
+  return <View><Text>Unknown step</Text></View>;
+}
